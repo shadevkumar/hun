@@ -324,7 +324,7 @@ nonisolated struct HunDaemonLogLine: Decodable, Equatable {
 }
 
 nonisolated final class HunDaemonClient: HunDaemonClientProtocol, HunGitClientProtocol {
-    private static let requiredProtocol = 15
+    static let requiredProtocol = 15
     private let socketPath: String
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
@@ -516,12 +516,15 @@ nonisolated final class HunDaemonClient: HunDaemonClientProtocol, HunGitClientPr
 nonisolated final class HunDaemonSupervisor: HunDaemonSupervisorProtocol {
     private let client: HunDaemonClient
     private let expectedRuntimeBuild: Result<HunRuntimeBuild, HunDaemonError>
+    private let homeURL: URL
 
     init(
         client: HunDaemonClient = HunDaemonClient(),
-        expectedRuntimeBuild: HunRuntimeBuild? = nil
+        expectedRuntimeBuild: HunRuntimeBuild? = nil,
+        homeURL: URL = HunPaths.homeURL
     ) {
         self.client = client
+        self.homeURL = homeURL
         if let expectedRuntimeBuild {
             self.expectedRuntimeBuild = .success(expectedRuntimeBuild)
         } else {
@@ -539,7 +542,24 @@ nonisolated final class HunDaemonSupervisor: HunDaemonSupervisorProtocol {
 
     func ensureDaemon() async throws {
         let expectedRuntimeBuild = try expectedRuntimeBuild.get()
-        if await client.isCompatibleDaemon(expectedBuild: expectedRuntimeBuild) {
+        let info: HunDaemonInfo
+        do {
+            info = try await client.daemonInfo()
+        } catch {
+            // A timeout is not a version mismatch. Keep a live daemon and its
+            // services intact; the next refresh can reconnect to it.
+            if let pid = resolvedDaemonProcessID(
+                reportedPID: 0,
+                pidPath: homeURL.appendingPathComponent("daemon.pid").path,
+                lockPath: homeURL.appendingPathComponent("daemon.lock").path
+            ), daemonProcessExists(pid) {
+                throw error
+            }
+            try await launchDaemon(expectedRuntimeBuild: expectedRuntimeBuild)
+            return
+        }
+
+        if expectedRuntimeBuild.matches(info, requiredProtocol: HunDaemonClient.requiredProtocol) {
             return
         }
 
@@ -565,7 +585,7 @@ nonisolated final class HunDaemonSupervisor: HunDaemonSupervisorProtocol {
         process.executableURL = URL(fileURLWithPath: binary)
         process.arguments = ["daemon"]
         var environment = await HunShellEnvironment.loginEnvironment()
-        environment["HUN_HOME"] = HunPaths.homeURL.path
+        environment["HUN_HOME"] = homeURL.path
         process.environment = environment
         process.standardInput = nil
         process.standardOutput = nil
@@ -589,8 +609,8 @@ nonisolated final class HunDaemonSupervisor: HunDaemonSupervisorProtocol {
     private func terminateExistingDaemon(reportedPID: Int, socketResponded: Bool) throws {
         let pid = resolvedDaemonProcessID(
             reportedPID: reportedPID,
-            pidPath: HunPaths.pidPath,
-            lockPath: HunPaths.lockPath
+            pidPath: homeURL.appendingPathComponent("daemon.pid").path,
+            lockPath: homeURL.appendingPathComponent("daemon.lock").path
         )
         guard let pid else {
             if socketResponded {
@@ -600,8 +620,8 @@ nonisolated final class HunDaemonSupervisor: HunDaemonSupervisorProtocol {
         }
 
         try terminateDaemonProcess(pid)
-        try? FileManager.default.removeItem(atPath: HunPaths.socketPath)
-        try? FileManager.default.removeItem(atPath: HunPaths.pidPath)
+        try? FileManager.default.removeItem(at: homeURL.appendingPathComponent("daemon.sock"))
+        try? FileManager.default.removeItem(at: homeURL.appendingPathComponent("daemon.pid"))
     }
 }
 
