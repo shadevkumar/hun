@@ -103,7 +103,9 @@ while True:
     index += 1
 """, home.path, firstResponse]
     let output = Pipe()
+    let errors = Pipe()
     process.standardOutput = output
+    process.standardError = errors
     try process.run()
     defer {
         if process.isRunning {
@@ -111,21 +113,26 @@ while True:
             process.waitUntilExit()
         }
     }
-    let ready = output.fileHandleForReading.availableData
-    try #require(String(data: ready, encoding: .utf8)?.contains("ready") == true)
+    let ready = String(data: output.fileHandleForReading.availableData, encoding: .utf8) ?? ""
+    guard ready.contains("ready") else {
+        process.waitUntilExit()
+        let detail = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        Issue.record("fake daemon did not start at \(home.path): \(detail)")
+        return
+    }
     let supervisor = HunDaemonSupervisor(
         client: HunDaemonClient(socketPath: home.appendingPathComponent("daemon.sock").path),
         expectedRuntimeBuild: HunRuntimeBuild(version: "test", commit: "test"),
         homeURL: home
     )
 
-    var probeFailed = false
+    var probeError: Error?
     do {
         try await supervisor.ensureDaemon()
     } catch {
-        probeFailed = true
+        probeError = error
     }
-    #expect(probeFailed == (firstResponse != "fast"))
+    #expect((probeError != nil) == (firstResponse != "fast"), "first probe error: \(String(describing: probeError))")
     try #require(process.isRunning)
 
     try await supervisor.ensureDaemon()
