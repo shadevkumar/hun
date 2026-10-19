@@ -15,12 +15,56 @@ struct HunDaemonRecoveryTests {
     @Test func aCompatibleDaemonIsReused() async throws {
         try await verifyExistingDaemonSurvivesProbe(firstResponse: "fast")
     }
+
+    @Test func aHeldLockMeansTheDaemonIsRunning() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let lockPath = home.appendingPathComponent("daemon.lock").path
+        try "4242".write(toFile: lockPath, atomically: true, encoding: .utf8)
+        let fd = Darwin.open(lockPath, O_RDWR)
+        try #require(fd >= 0)
+        defer {
+            _ = hunSystemFlock(fd, LOCK_UN)
+            _ = Darwin.close(fd)
+        }
+        try #require(hunSystemFlock(fd, LOCK_EX | LOCK_NB) == 0)
+
+        #expect(isDaemonRunning(pidPath: home.appendingPathComponent("daemon.pid").path, lockPath: lockPath))
+    }
+
+    @Test func aStalePIDFileIsIgnoredWhenTheLockIsFree() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let lockPath = home.appendingPathComponent("daemon.lock").path
+        let pidPath = home.appendingPathComponent("daemon.pid").path
+        try "4242".write(toFile: lockPath, atomically: true, encoding: .utf8)
+        // A crashed daemon's PID now belongs to an unrelated live process.
+        try String(getpid()).write(toFile: pidPath, atomically: true, encoding: .utf8)
+
+        #expect(!isDaemonRunning(pidPath: pidPath, lockPath: lockPath))
+    }
+
+    @Test func thePIDFileIsUsedWhenThereIsNoLock() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let lockPath = home.appendingPathComponent("daemon.lock").path
+        let pidPath = home.appendingPathComponent("daemon.pid").path
+
+        #expect(!isDaemonRunning(pidPath: pidPath, lockPath: lockPath))
+        try String(getpid()).write(toFile: pidPath, atomically: true, encoding: .utf8)
+        #expect(isDaemonRunning(pidPath: pidPath, lockPath: lockPath))
+    }
 }
 
-private func verifyExistingDaemonSurvivesProbe(firstResponse: String) async throws {
+private func makeHome() throws -> URL {
     let home = FileManager.default.temporaryDirectory
         .appendingPathComponent("hr-" + UUID().uuidString.prefix(8), isDirectory: true)
     try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    return home
+}
+
+private func verifyExistingDaemonSurvivesProbe(firstResponse: String) async throws {
+    let home = try makeHome()
     defer { try? FileManager.default.removeItem(at: home) }
 
     // A separate process holds a real Unix socket and PID file. It must survive
