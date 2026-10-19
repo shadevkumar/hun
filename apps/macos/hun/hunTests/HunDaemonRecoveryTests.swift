@@ -102,6 +102,12 @@ while True:
     threading.Thread(target=reply, args=(conn, index), daemon=True).start()
     index += 1
 """, home.path, firstResponse]
+    // xcodebuild hands the test host DEVELOPER_DIR and DYLD_* for the selected
+    // Xcode. With several Xcodes installed (as on CI), the /usr/bin/python3
+    // shim then mixes their libraries and fails to load.
+    process.environment = ProcessInfo.processInfo.environment.filter {
+        !$0.key.hasPrefix("DYLD_") && $0.key != "DEVELOPER_DIR"
+    }
     let output = Pipe()
     let errors = Pipe()
     process.standardOutput = output
